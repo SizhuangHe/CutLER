@@ -22,10 +22,11 @@ import json
 
 import dino
 # modfied by Xudong Wang based on third_party/TokenCut
-sys.path.append('../')
-sys.path.append('../third_party')
-from TokenCut.unsupervised_saliency_detection import utils, metric
-from TokenCut.unsupervised_saliency_detection.object_discovery import detect_box
+# sys.path.append('../')
+# sys.path.append('../third_party')
+# from TokenCut.unsupervised_saliency_detection import utils, metric
+# from TokenCut.unsupervised_saliency_detection.object_discovery import detect_box
+import utils, metric
 # bilateral_solver codes are modfied based on https://github.com/poolio/bilateral_solver/blob/master/notebooks/bilateral_solver.ipynb
 # from TokenCut.unsupervised_saliency_detection.bilateral_solver import BilateralSolver, BilateralGrid
 # crf codes are are modfied based on https://github.com/lucasb-eyer/pydensecrf/blob/master/pydensecrf/tests/test_dcrf.py
@@ -36,6 +37,37 @@ ToTensor = transforms.Compose([transforms.ToTensor(),
                                transforms.Normalize(
                                 (0.485, 0.456, 0.406),
                                 (0.229, 0.224, 0.225)),])
+def detect_box(bipartition, seed,  dims, initial_im_size=None, scales=None, principle_object=True):
+    """
+    Extract a box corresponding to the seed patch. Among connected components extract from the affinity matrix, select the one corresponding to the seed patch.
+    """
+    w_featmap, h_featmap = dims
+    objects, num_objects = ndimage.label(bipartition)
+    cc = objects[np.unravel_index(seed, dims)]
+
+
+    if principle_object:
+        mask = np.where(objects == cc)
+       # Add +1 because excluded max
+        ymin, ymax = min(mask[0]), max(mask[0]) + 1
+        xmin, xmax = min(mask[1]), max(mask[1]) + 1
+        # Rescale to image size
+        r_xmin, r_xmax = scales[1] * xmin, scales[1] * xmax
+        r_ymin, r_ymax = scales[0] * ymin, scales[0] * ymax
+        pred = [r_xmin, r_ymin, r_xmax, r_ymax]
+
+        # Check not out of image size (used when padding)
+        if initial_im_size:
+            pred[2] = min(pred[2], initial_im_size[1])
+            pred[3] = min(pred[3], initial_im_size[0])
+
+        # Coordinate predictions for the feature space
+        # Axis different then in image space
+        pred_feats = [ymin, xmin, ymax, xmax]
+
+        return pred, pred_feats, objects, mask
+    else:
+        raise NotImplementedError
 
 def get_affinity_matrix(feats, tau, eps=1e-5):
     # get affinity matrix via measuring patch-wise cosine similarity
@@ -309,7 +341,7 @@ if __name__ == "__main__":
     parser.add_argument('--out-dir', type=str, help='output directory')
     parser.add_argument('--vit-arch', type=str, default='small', choices=['base', 'small'], help='which architecture')
     parser.add_argument('--vit-feat', type=str, default='k', choices=['k', 'q', 'v', 'kqv'], help='which features')
-    parser.add_argument('--patch-size', type=int, default=16, choices=[16, 8], help='patch size')
+    parser.add_argument('--patch-size', type=int, default=8, choices=[16, 8], help='patch size')
     parser.add_argument('--nb-vis', type=int, default=20, choices=[1, 200], help='nb of visualization')
     parser.add_argument('--img-path', type=str, default=None, help='single image visualization')
 

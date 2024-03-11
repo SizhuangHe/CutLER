@@ -1,5 +1,16 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-
+# Copyright (c) Facebook, Inc. and its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Copied from Dino repo. https://github.com/facebookresearch/dino
 Mostly copy-paste from timm library.
@@ -11,6 +22,11 @@ from functools import partial
 import torch
 import torch.nn as nn
 
+from tensorly.decomposition import parafac,tucker
+import tensorly as tl
+import tensortools as tt
+from tensorly.cp_tensor import cp_normalize
+import numpy as np
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
     # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
@@ -110,14 +126,33 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
+        temp_attn = (q @ k.transpose(-2, -1)) * self.scale
+        
+        '''
+        # add tensor decomposition
+        attentions_tn = tl.tensor(attn.squeeze(0).detach().cpu().numpy())
+        print(attentions_tn.shape)
+        cp_factors = parafac(attentions_tn, rank=6, random_state = 42)
+        cp_factors = cp_normalize(cp_factors)
+        for i in range(6):
+            a = cp_factors.factors[0][:,i]
+            b = cp_factors.factors[1][:,i]
+            c = cp_factors.factors[2][:,i]
+            #d = cp_factors.factors[3][:,i]
+            decomp = np.einsum('a,b,c->abc',a,b,c)
+            if i==0:
+                attn = decomp*cp_factors.weights[i]
+            else:
+                attn += decomp*cp_factors.weights[i]
+        attn = torch.tensor(attn).cuda().unsqueeze(0)
+        '''
+        attn = temp_attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
-
+        #print(" within dino:", attn.shape, x.shape, v.shape)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x, attn
+        return x, attn, temp_attn
 
 
 class Block(nn.Module):
@@ -133,9 +168,9 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, return_attention=False):
-        y, attn = self.attn(self.norm1(x))
+        y, attn,temp_attn = self.attn(self.norm1(x))
         if return_attention:
-            return attn
+            return attn, temp_attn
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
@@ -239,6 +274,7 @@ class VisionTransformer(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
+        
         return x[:, 0]
 
     def get_last_selfattention(self, x):
@@ -249,6 +285,30 @@ class VisionTransformer(nn.Module):
             else:
                 # return attention of the last block
                 return blk(x, return_attention=True)
+                
+    def get_all_tempattention(self, x):
+        attentions = []
+        x = self.prepare_tokens(x)
+        for i, blk in enumerate(self.blocks):
+        
+            x = blk(x)
+            # return attention of the last block
+            #print("not passing softmax")
+            attentions.append(blk(x, return_attention=True)[1])
+        return attentions
+
+    def get_all_selfattention(self, x):
+        attentions = []
+        x = self.prepare_tokens(x)
+        for i, blk in enumerate(self.blocks):
+        
+            x = blk(x)
+            # return attention of the last block
+            #print("not passing softmax")
+            attentions.append(blk(x, return_attention=True)[0])
+        return attentions
+
+    
 
     def get_intermediate_layers(self, x, n=1):
         x = self.prepare_tokens(x)
@@ -259,6 +319,7 @@ class VisionTransformer(nn.Module):
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
+
 
 
 def vit_small(patch_size=16, **kwargs):
@@ -273,6 +334,9 @@ def vit_base(patch_size=16, **kwargs):
         patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
+
+
+
 
 class ViTFeat(nn.Module):
     """ Vision Transformer """
@@ -289,7 +353,7 @@ class ViTFeat(nn.Module):
         self.patch_size = patch_size
 
 #        state_dict = torch.load(pretrained_pth, map_location="cpu")
-        state_dict = torch.hub.load_state_dict_from_url(pretrained_pth)
+        state_dict = torch.hub.load_state_dict_from_url("https://dl.fbaipublicfiles.com"+pretrained_pth)
         self.model.load_state_dict(state_dict, strict=True)
         print('Loading weight from {}'.format(pretrained_pth))
 
@@ -307,7 +371,10 @@ class ViTFeat(nn.Module):
             h, w = img.shape[2], img.shape[3]
             feat_h, feat_w = h // self.patch_size, w // self.patch_size
             attentions = self.model.get_last_selfattention(img)
+            #print('dino: ', h,w,feat_h,feat_w)
             bs, nb_head, nb_token = attentions.shape[0], attentions.shape[1], attentions.shape[2]
+            #print('dino: ', bs, nb_head, nb_token)
+            
             qkv = (
                     feat_out["qkv"]
                     .reshape(bs, nb_token, 3, nb_head, -1)

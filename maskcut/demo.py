@@ -13,7 +13,8 @@ from scipy import ndimage
 from detectron2.utils.colormap import random_color
 
 import dino # model
-from third_party.TokenCut.unsupervised_saliency_detection import metric
+# from third_party.TokenCut.unsupervised_saliency_detection import metric
+import metric
 from crf import densecrf
 from maskcut import maskcut
 
